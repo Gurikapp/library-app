@@ -2,8 +2,6 @@
   import { createEventDispatcher, onMount, onDestroy, tick } from "svelte";
   import { marked } from "marked";
 
-  marked.setOptions({ breaks: true });
-
   export let book;
   const dispatch = createEventDispatcher();
 
@@ -13,44 +11,93 @@
   let pageContainer;
   let measureDiv;
 
-  function getParagraphs(content) {
-    const blocks = content.split(/\n\n+/).filter((p) => p.trim());
-    const result = [];
-    for (const block of blocks) {
-      const lines = block.split("\n").filter((l) => l.trim());
-      if (lines.length > 1) {
-        result.push(...lines);
-      } else {
-        result.push(block);
-      }
-    }
-    return result;
+  function preprocessContent(content) {
+    return content
+      .replace(/^~~~$/gm, "\n\n__SPACER__\n\n")
+      .replace(/<br\s*\/?>/gi, "\n\n__SPACER__\n\n");
+  }
+
+  function getBlocks(content) {
+    const processed = preprocessContent(content);
+    return processed
+      .split(/\n\n+/)
+      .map((b) => b.trim())
+      .filter((b) => b.length > 0);
+  }
+
+  function renderBlocks(blocks) {
+    return blocks
+      .map((block) => {
+        if (block === "__SPACER__") return '<div class="spacer"></div>';
+        return marked.parse(block, { breaks: true });
+      })
+      .join("");
+  }
+
+  async function fits(testBlocks) {
+    measureDiv.innerHTML = renderBlocks(testBlocks);
+    await tick();
+    // Берём реальную высоту page-area минус запас
+    const available = pageContainer.clientHeight - 40;
+    return measureDiv.offsetHeight <= available;
   }
 
   async function buildPages() {
     if (!measureDiv || !pageContainer) return;
 
-    const maxHeight = pageContainer.clientHeight - 20;
-    const paragraphs = getParagraphs(book.content);
+    const blocks = getBlocks(book.content);
     const result = [];
     let current = [];
 
-    for (const para of paragraphs) {
-      current.push(para);
-      measureDiv.innerHTML = marked(current.join("\n"));
-      await tick();
+    for (const block of blocks) {
+      if (await fits([...current, block])) {
+        current.push(block);
+      } else {
+        // Текущая страница не вмещает блок
+        if (current.length > 0) {
+          result.push(renderBlocks(current));
+          current = [];
+        }
 
-      if (measureDiv.offsetHeight > maxHeight && current.length > 1) {
-        current.pop();
-        result.push(current.join("\n"));
-        current = [para];
-        measureDiv.innerHTML = marked(current.join("\n"));
-        await tick();
+        // Проверяем влезает ли блок сам по себе
+        if (await fits([block])) {
+          current = [block];
+        } else {
+          // Блок слишком длинный — делим по предложениям
+          const sentences = block
+            .split(/([^.!?…]*[.!?…]+\s*)/g)
+            .filter((s) => s.trim());
+          let acc = "";
+          for (const sentence of sentences) {
+            const test = acc ? acc + sentence : sentence;
+            if (await fits([test])) {
+              acc = test;
+            } else {
+              if (acc) {
+                if (await fits([...current, acc])) {
+                  current.push(acc);
+                } else {
+                  if (current.length > 0) result.push(renderBlocks(current));
+                  current = [acc];
+                }
+              }
+              acc = sentence;
+            }
+          }
+          if (acc) {
+            if (await fits([...current, acc])) {
+              current.push(acc);
+            } else {
+              if (current.length > 0) result.push(renderBlocks(current));
+              current = [acc];
+            }
+          }
+        }
       }
     }
 
-    if (current.length > 0) result.push(current.join("\n"));
-    pages = result.map((p) => marked(p));
+    if (current.length > 0) result.push(renderBlocks(current));
+    pages = result.filter((p) => p.trim());
     totalPages = pages.length || 1;
     currentPage = 0;
   }
@@ -96,14 +143,12 @@
   });
 </script>
 
-<!-- Overlay backdrop -->
 <div
   class="overlay"
   on:click={() => dispatch("close")}
   aria-hidden="true"
 ></div>
 
-<!-- Book reader -->
 <div
   class="reader"
   role="dialog"
@@ -140,12 +185,11 @@
       ‹
     </div>
 
-    <!-- невидимый блок для измерения -->
     <div class="measure-div" bind:this={measureDiv} aria-hidden="true"></div>
 
     <div class="page">
       <div class="page-inner">
-        <div class="page-content" style="--book-color: {book.color}">
+        <div class="page-content">
           {@html pages[currentPage] ?? ""}
         </div>
       </div>
@@ -303,11 +347,23 @@
     box-sizing: border-box;
   }
 
+  :global(.page-content p) {
+    margin-bottom: 0;
+    text-align: left;
+    hyphens: auto;
+  }
+
+  :global(.page-content .spacer) {
+    height: 1rem;
+    display: block;
+  }
+
   :global(.page-content h1) {
     font-family: "Cinzel Decorative", serif;
     font-size: 1.3rem;
     color: #4a2d0a;
-    margin-bottom: 1.5rem;
+    margin-bottom: 1rem;
+    margin-top: 0.5rem;
     text-align: center;
     border-bottom: 1px solid rgba(200, 168, 75, 0.4);
     padding-bottom: 0.8rem;
@@ -317,25 +373,26 @@
     font-family: "Cinzel Decorative", serif;
     font-size: 1rem;
     color: #4a2d0a;
-    margin: 1rem 0 0.5rem;
-  }
-
-  :global(.page-content p) {
-    margin-bottom: 1rem;
-    text-align: justify;
-    hyphens: auto;
+    margin: 0.8rem 0 0.3rem;
   }
 
   :global(.page-content hr) {
     border: none;
     text-align: center;
-    margin: 1.5rem 0;
+    margin: 1.2rem 0;
     color: rgba(200, 168, 75, 0.6);
   }
 
   :global(.page-content hr::before) {
     content: "✦ ✦ ✦";
     font-size: 0.8rem;
+  }
+
+  :global(.page-content em) {
+    font-style: italic;
+  }
+  :global(.page-content strong) {
+    font-weight: 700;
   }
 
   .measure-div {
@@ -351,6 +408,16 @@
     line-height: 1.8;
     color: #2a1a08;
     box-sizing: border-box;
+    hyphens: auto;
+    word-break: break-word;
+  }
+
+  :global(.measure-div p) {
+    margin-bottom: 0;
+  }
+  :global(.measure-div .spacer) {
+    height: 1rem;
+    display: block;
   }
 
   .page-hint {
@@ -377,7 +444,6 @@
   .page-hint.right {
     right: 0.8rem;
   }
-
   .page-area:hover .page-hint.visible {
     color: rgba(74, 52, 32, 0.4);
   }
@@ -442,15 +508,27 @@
       inset: 0;
       border-radius: 0;
     }
-
     .page-content {
-      padding: 1.5rem 1.5rem;
+      padding: 1.5rem;
       font-size: 1rem;
+      hyphens: auto;
+      word-break: break-word;
     }
-
     .measure-div {
-      padding: 1.5rem 1.5rem;
+      padding: 1.5rem;
       font-size: 1rem;
+      hyphens: auto;
+      word-break: break-word;
+    }
+  }
+  @media (max-width: 400px) {
+    .page-content {
+      padding: 1rem;
+      font-size: 0.95rem;
+    }
+    .measure-div {
+      padding: 1rem;
+      font-size: 0.95rem;
     }
   }
 </style>

@@ -10,6 +10,7 @@
   let totalPages = 1;
   let pageContainer;
   let measureDiv;
+  let isBuilding = true;
 
   function preprocessContent(content) {
     return content
@@ -35,15 +36,21 @@
   }
 
   async function fits(testBlocks) {
+    if (!measureDiv || !pageContainer) return false;
     measureDiv.innerHTML = renderBlocks(testBlocks);
     await tick();
-    // Берём реальную высоту page-area минус запас
-    const available = pageContainer.clientHeight - 40;
-    return measureDiv.offsetHeight <= available;
+    // Точный расчёт: высота контейнера минус padding (2.5rem top + 2.5rem bottom = 5rem = 80px на десктопе)
+    const containerH = pageContainer.clientHeight;
+    const style = window.getComputedStyle(pageContainer);
+    const paddingTop = parseFloat(style.paddingTop) || 0;
+    const paddingBottom = parseFloat(style.paddingBottom) || 0;
+    const available = containerH - paddingTop - paddingBottom - 4; // 4px запас
+    return measureDiv.scrollHeight <= available;
   }
 
   async function buildPages() {
     if (!measureDiv || !pageContainer) return;
+    isBuilding = true;
 
     const blocks = getBlocks(book.content);
     const result = [];
@@ -53,23 +60,19 @@
       if (await fits([...current, block])) {
         current.push(block);
       } else {
-        // Текущая страница не вмещает блок
         if (current.length > 0) {
           result.push(renderBlocks(current));
           current = [];
         }
 
-        // Проверяем влезает ли блок сам по себе
         if (await fits([block])) {
           current = [block];
         } else {
-          // Блок слишком длинный — делим по предложениям
-          const sentences = block
-            .split(/([^.!?…]*[.!?…]+\s*)/g)
-            .filter((s) => s.trim());
+          // Блок не влезает сам — делим по предложениям/строкам
+          const lines = block.split(/\n/).filter(s => s.trim());
           let acc = "";
-          for (const sentence of sentences) {
-            const test = acc ? acc + sentence : sentence;
+          for (const line of lines) {
+            const test = acc ? acc + "\n" + line : line;
             if (await fits([test])) {
               acc = test;
             } else {
@@ -81,7 +84,7 @@
                   current = [acc];
                 }
               }
-              acc = sentence;
+              acc = line;
             }
           }
           if (acc) {
@@ -98,21 +101,18 @@
 
     if (current.length > 0) result.push(renderBlocks(current));
     pages = result.filter((p) => p.trim());
-    totalPages = pages.length || 1;
+    if (pages.length === 0) pages = [""];
+    totalPages = pages.length;
     currentPage = 0;
+    isBuilding = false;
   }
 
   function goToPage(index) {
     if (index < 0 || index >= totalPages) return;
     currentPage = index;
   }
-
-  function nextPage() {
-    goToPage(currentPage + 1);
-  }
-  function prevPage() {
-    goToPage(currentPage - 1);
-  }
+  function nextPage() { goToPage(currentPage + 1); }
+  function prevPage() { goToPage(currentPage - 1); }
 
   function handleAreaClick(e) {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -121,21 +121,19 @@
   }
 
   function handleKeydown(e) {
-    if (e.key === "ArrowRight" || e.key === " ") {
-      e.preventDefault();
-      nextPage();
-    }
-    if (e.key === "ArrowLeft") {
-      e.preventDefault();
-      prevPage();
-    }
+    if (e.key === "ArrowRight" || e.key === " ") { e.preventDefault(); nextPage(); }
+    if (e.key === "ArrowLeft") { e.preventDefault(); prevPage(); }
     if (e.key === "Escape") dispatch("close");
   }
 
   onMount(async () => {
     window.addEventListener("keydown", handleKeydown);
     await tick();
-    await buildPages();
+    // Ждём, пока pageContainer отрендерится с реальными размерами
+    requestAnimationFrame(async () => {
+      await tick();
+      await buildPages();
+    });
   });
 
   onDestroy(() => {
@@ -143,28 +141,12 @@
   });
 </script>
 
-<div
-  class="overlay"
-  on:click={() => dispatch("close")}
-  aria-hidden="true"
-></div>
+<div class="overlay" on:click={() => dispatch("close")} aria-hidden="true"></div>
 
-<div
-  class="reader"
-  role="dialog"
-  aria-modal="true"
-  aria-label="Читать: {book.title}"
->
-  <div
-    class="reader-header"
-    style="--book-color: {book.color}; --text-color: {book.textColor}"
-  >
+<div class="reader" role="dialog" aria-modal="true" aria-label="Читать: {book.title}">
+  <div class="reader-header" style="--book-color: {book.color}; --text-color: {book.textColor}">
     <h2 class="reader-title">{book.title}</h2>
-    <button
-      class="close-btn"
-      on:click={() => dispatch("close")}
-      aria-label="Закрыть книгу">✕</button
-    >
+    <button class="close-btn" on:click={() => dispatch("close")} aria-label="Закрыть книгу">✕</button>
   </div>
 
   <div
@@ -173,41 +155,29 @@
     on:click={handleAreaClick}
     role="button"
     tabindex="0"
-    on:keydown={(e) => {
-      if (e.key === "Enter") handleAreaClick(e);
-    }}
+    on:keydown={(e) => { if (e.key === "Enter") handleAreaClick(e); }}
   >
-    <div
-      class="page-hint left"
-      class:visible={currentPage > 0}
-      aria-hidden="true"
-    >
-      ‹
-    </div>
+    <div class="page-hint left" class:visible={currentPage > 0} aria-hidden="true">‹</div>
 
+    <!-- Невидимый div для измерений — он ДОЛЖЕН иметь те же стили, что и .page-content -->
     <div class="measure-div" bind:this={measureDiv} aria-hidden="true"></div>
 
     <div class="page">
-      <div class="page-inner">
+      {#if isBuilding}
+        <div class="loading">
+          <span>✦</span>
+        </div>
+      {:else}
         <div class="page-content">
           {@html pages[currentPage] ?? ""}
         </div>
-      </div>
+      {/if}
     </div>
 
-    <div
-      class="page-hint right"
-      class:visible={currentPage < totalPages - 1}
-      aria-hidden="true"
-    >
-      ›
-    </div>
+    <div class="page-hint right" class:visible={currentPage < totalPages - 1} aria-hidden="true">›</div>
   </div>
 
-  <div
-    class="reader-footer"
-    style="--book-color: {book.color}; --text-color: {book.textColor}"
-  >
+  <div class="reader-footer" style="--book-color: {book.color}; --text-color: {book.textColor}">
     <div class="page-dots">
       {#each pages as _, i}
         <button
@@ -232,18 +202,19 @@
     animation: fadeIn 0.3s ease;
   }
 
-  @keyframes fadeIn {
-    from {
-      opacity: 0;
-    }
-    to {
-      opacity: 1;
-    }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.4; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.3); }
   }
 
   .reader {
     position: fixed;
-    inset: 5vh 5vw;
+    inset: 4vh 5vw;
     z-index: 101;
     display: flex;
     flex-direction: column;
@@ -262,7 +233,7 @@
     display: flex;
     align-items: center;
     gap: 1rem;
-    padding: 1rem 1.5rem;
+    padding: 0.85rem 1.5rem;
     background: linear-gradient(
       135deg,
       color-mix(in srgb, var(--book-color) 90%, black),
@@ -278,10 +249,11 @@
     flex: 1;
     text-align: center;
     font-family: "Cinzel Decorative", serif;
-    font-size: clamp(0.8rem, 2vw, 1.2rem);
+    font-size: clamp(0.7rem, 2vw, 1.1rem);
     color: var(--text-color);
     text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
     letter-spacing: 0.05em;
+    padding-right: 2rem;
   }
 
   .close-btn {
@@ -297,16 +269,10 @@
     opacity: 0.6;
     padding: 0.3rem 0.5rem;
     border-radius: 3px;
-    transition:
-      opacity 0.2s,
-      background 0.2s;
+    transition: opacity 0.2s, background 0.2s;
     line-height: 1;
   }
-
-  .close-btn:hover {
-    opacity: 1;
-    background: rgba(0, 0, 0, 0.2);
-  }
+  .close-btn:hover { opacity: 1; background: rgba(0, 0, 0, 0.2); }
 
   .page-area {
     flex: 1;
@@ -314,87 +280,34 @@
     display: flex;
     align-items: stretch;
     cursor: pointer;
+    /* ВАЖНО: overflow: hidden обрезал содержимое — теперь hidden только для measure */
     overflow: hidden;
     background: #f5ead0;
     min-height: 0;
   }
 
   .page {
-    position: relative;
-    width: 100%;
-    height: 100%;
-  }
-
-  .page-inner {
-    width: 100%;
-    height: 100%;
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
   }
 
   .page-content {
-    padding: 2.5rem 3rem;
-    height: 100%;
+    flex: 1;
+    padding: 2rem 3rem;
     overflow: hidden;
     font-family: "Crimson Text", serif;
-    font-size: 1.1rem;
+    font-size: clamp(0.95rem, 1.5vw, 1.1rem);
     line-height: 1.8;
     color: #2a1a08;
-    background: linear-gradient(
-        180deg,
-        rgba(200, 168, 75, 0.05) 0%,
-        transparent 30%
-      ),
-      #f5ead0;
+    background: linear-gradient(180deg, rgba(200, 168, 75, 0.05) 0%, transparent 30%), #f5ead0;
     box-sizing: border-box;
+    /* Высота должна точно совпадать с тем, что измеряет measureDiv */
+    height: 100%;
   }
 
-  :global(.page-content p) {
-    margin-bottom: 0;
-    text-align: left;
-    hyphens: auto;
-  }
-
-  :global(.page-content .spacer) {
-    height: 1rem;
-    display: block;
-  }
-
-  :global(.page-content h1) {
-    font-family: "Cinzel Decorative", serif;
-    font-size: 1.3rem;
-    color: #4a2d0a;
-    margin-bottom: 1rem;
-    margin-top: 0.5rem;
-    text-align: center;
-    border-bottom: 1px solid rgba(200, 168, 75, 0.4);
-    padding-bottom: 0.8rem;
-  }
-
-  :global(.page-content h2, .page-content h3) {
-    font-family: "Cinzel Decorative", serif;
-    font-size: 1rem;
-    color: #4a2d0a;
-    margin: 0.8rem 0 0.3rem;
-  }
-
-  :global(.page-content hr) {
-    border: none;
-    text-align: center;
-    margin: 1.2rem 0;
-    color: rgba(200, 168, 75, 0.6);
-  }
-
-  :global(.page-content hr::before) {
-    content: "✦ ✦ ✦";
-    font-size: 0.8rem;
-  }
-
-  :global(.page-content em) {
-    font-style: italic;
-  }
-  :global(.page-content strong) {
-    font-weight: 700;
-  }
-
+  /* measureDiv ДОЛЖЕН иметь идентичные padding/font/line-height */
   .measure-div {
     position: absolute;
     visibility: hidden;
@@ -402,23 +315,72 @@
     top: 0;
     left: 0;
     right: 0;
-    padding: 2.5rem 3rem;
+    /* padding совпадает с .page-content */
+    padding: 2rem 3rem;
     font-family: "Crimson Text", serif;
-    font-size: 1.1rem;
+    font-size: clamp(0.95rem, 1.5vw, 1.1rem);
     line-height: 1.8;
     color: #2a1a08;
     box-sizing: border-box;
     hyphens: auto;
     word-break: break-word;
+    /* overflow: visible чтобы scrollHeight был правильным */
+    overflow: visible;
+    z-index: -1;
   }
 
-  :global(.measure-div p) {
-    margin-bottom: 0;
+  .loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    font-size: 2rem;
+    color: rgba(74, 52, 32, 0.3);
+    animation: pulse 1.5s ease-in-out infinite;
   }
-  :global(.measure-div .spacer) {
-    height: 1rem;
-    display: block;
+
+  :global(.page-content p) { margin-bottom: 0.5em; text-align: left; hyphens: auto; }
+  :global(.page-content p:last-child) { margin-bottom: 0; }
+  :global(.page-content .spacer) { height: 0.8rem; display: block; }
+  :global(.page-content h1) {
+    font-family: "Cinzel Decorative", serif;
+    font-size: clamp(1rem, 2vw, 1.3rem);
+    color: #4a2d0a;
+    margin-bottom: 0.8rem;
+    margin-top: 0.3rem;
+    text-align: center;
+    border-bottom: 1px solid rgba(200, 168, 75, 0.4);
+    padding-bottom: 0.6rem;
   }
+  :global(.page-content h2, .page-content h3) {
+    font-family: "Cinzel Decorative", serif;
+    font-size: clamp(0.85rem, 1.5vw, 1rem);
+    color: #4a2d0a;
+    margin: 0.6rem 0 0.2rem;
+  }
+  :global(.page-content hr) {
+    border: none; text-align: center; margin: 1rem 0; color: rgba(200, 168, 75, 0.6);
+  }
+  :global(.page-content hr::before) { content: "✦ ✦ ✦"; font-size: 0.8rem; }
+  :global(.page-content em) { font-style: italic; }
+  :global(.page-content strong) { font-weight: 700; }
+
+  :global(.measure-div p) { margin-bottom: 0.5em; }
+  :global(.measure-div p:last-child) { margin-bottom: 0; }
+  :global(.measure-div .spacer) { height: 0.8rem; display: block; }
+  :global(.measure-div h1) {
+    font-family: "Cinzel Decorative", serif;
+    font-size: clamp(1rem, 2vw, 1.3rem);
+    margin-bottom: 0.8rem; margin-top: 0.3rem;
+    border-bottom: 1px solid rgba(200,168,75,0.4);
+    padding-bottom: 0.6rem;
+  }
+  :global(.measure-div h2, .measure-div h3) {
+    font-family: "Cinzel Decorative", serif;
+    font-size: clamp(0.85rem, 1.5vw, 1rem);
+    margin: 0.6rem 0 0.2rem;
+  }
+  :global(.measure-div hr) { margin: 1rem 0; }
 
   .page-hint {
     position: absolute;
@@ -427,35 +389,23 @@
     font-size: 2.5rem;
     color: rgba(74, 52, 32, 0.15);
     pointer-events: none;
-    transition:
-      opacity 0.3s,
-      color 0.3s;
+    transition: opacity 0.3s, color 0.3s;
     opacity: 0;
     font-family: "Crimson Text", serif;
     z-index: 2;
   }
-
-  .page-hint.visible {
-    opacity: 1;
-  }
-  .page-hint.left {
-    left: 0.8rem;
-  }
-  .page-hint.right {
-    right: 0.8rem;
-  }
-  .page-area:hover .page-hint.visible {
-    color: rgba(74, 52, 32, 0.4);
-  }
+  .page-hint.visible { opacity: 1; }
+  .page-hint.left { left: 0.8rem; }
+  .page-hint.right { right: 0.8rem; }
+  .page-area:hover .page-hint.visible { color: rgba(74, 52, 32, 0.4); }
 
   .reader-footer {
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 1rem;
-    padding: 0.8rem 1.5rem;
-    background: linear-gradient(
-      135deg,
+    padding: 0.6rem 1.5rem;
+    background: linear-gradient(135deg,
       color-mix(in srgb, var(--book-color) 90%, black),
       var(--book-color)
     );
@@ -473,26 +423,14 @@
   }
 
   .page-dot {
-    width: 6px;
-    height: 6px;
+    width: 6px; height: 6px;
     border-radius: 50%;
     background: rgba(200, 168, 75, 0.3);
-    border: none;
-    cursor: pointer;
-    padding: 0;
-    transition:
-      background 0.2s,
-      transform 0.2s;
+    border: none; cursor: pointer; padding: 0;
+    transition: background 0.2s, transform 0.2s;
   }
-
-  .page-dot.active {
-    background: var(--text-color, #d4af37);
-    transform: scale(1.3);
-  }
-
-  .page-dot:hover {
-    background: rgba(200, 168, 75, 0.7);
-  }
+  .page-dot.active { background: var(--text-color, #d4af37); transform: scale(1.3); }
+  .page-dot:hover { background: rgba(200, 168, 75, 0.7); }
 
   .page-counter {
     font-family: "Crimson Text", serif;
@@ -504,31 +442,13 @@
   }
 
   @media (max-width: 768px) {
-    .reader {
-      inset: 0;
-      border-radius: 0;
-    }
-    .page-content {
-      padding: 1.5rem;
-      font-size: 1rem;
-      hyphens: auto;
-      word-break: break-word;
-    }
-    .measure-div {
-      padding: 1.5rem;
-      font-size: 1rem;
-      hyphens: auto;
-      word-break: break-word;
-    }
+    .reader { inset: 0; border-radius: 0; }
+    .reader-header { padding: 0.7rem 1rem; }
+    .page-content { padding: 1.2rem 1.4rem; font-size: 1rem; }
+    .measure-div { padding: 1.2rem 1.4rem; font-size: 1rem; }
   }
   @media (max-width: 400px) {
-    .page-content {
-      padding: 1rem;
-      font-size: 0.95rem;
-    }
-    .measure-div {
-      padding: 1rem;
-      font-size: 0.95rem;
-    }
+    .page-content { padding: 1rem; font-size: 0.95rem; }
+    .measure-div { padding: 1rem; font-size: 0.95rem; }
   }
 </style>
